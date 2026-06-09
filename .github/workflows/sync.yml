@@ -1,0 +1,79 @@
+name: Sync with upstream
+
+# Weekly (and on-demand) check for new commits on upstream
+# SlimeVR-Tracker-nRF-Receiver `main`. When upstream is ahead, this merges
+# upstream into a `sync/upstream-<date>` branch and opens a PR against this
+# fork's default branch for review.
+#
+# The release pipeline (release.yml) clones upstream fresh on every run, so
+# firmware releases keep working even if a sync PR is left unmerged. This
+# workflow exists to keep the fork's *source tree* current for local dev.
+
+on:
+  schedule:
+    # Mondays 05:00 UTC (before the release build). NOTE: `schedule` only runs
+    # from the repo's DEFAULT branch — this workflow must live there.
+    - cron: "0 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  UPSTREAM_URL: https://github.com/SlimeVR/SlimeVR-Tracker-nRF-Receiver.git
+  UPSTREAM_BRANCH: main
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📥 Checkout default branch
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: 🔄 Merge upstream and open PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git remote add upstream "$UPSTREAM_URL"
+          git fetch --no-tags upstream "$UPSTREAM_BRANCH"
+
+          # Nothing to do if upstream is already an ancestor of our base branch.
+          if git merge-base --is-ancestor "upstream/$UPSTREAM_BRANCH" HEAD; then
+            echo "✅ Already up to date with upstream/$UPSTREAM_BRANCH."
+            exit 0
+          fi
+
+          SYNC_BRANCH="sync/upstream-$(date -u +%Y%m%d)"
+          git checkout -B "$SYNC_BRANCH"
+
+          if ! git merge --no-edit "upstream/$UPSTREAM_BRANCH"; then
+            git merge --abort
+            echo "::error::Upstream merge has conflicts. Resolve manually:"
+            echo "::error::git fetch upstream && git merge upstream/$UPSTREAM_BRANCH"
+            exit 1
+          fi
+
+          git push --force-with-lease origin "$SYNC_BRANCH"
+
+          TITLE="Sync with upstream ($(date -u +%Y-%m-%d))"
+          BODY="Automated weekly sync: merges \`upstream/${UPSTREAM_BRANCH}\` into \`${BASE}\`.
+
+          Review the upstream changes below and merge when ready. Firmware releases are
+          unaffected by the state of this PR (release.yml always builds from fresh upstream)."
+
+          if gh pr view "$SYNC_BRANCH" --json number >/dev/null 2>&1; then
+            gh pr edit "$SYNC_BRANCH" --title "$TITLE" --body "$BODY"
+            echo "🔁 Updated existing PR for $SYNC_BRANCH."
+          else
+            gh pr create --base "$BASE" --head "$SYNC_BRANCH" --title "$TITLE" --body "$BODY"
+            echo "🆕 Opened PR for $SYNC_BRANCH."
+          fi

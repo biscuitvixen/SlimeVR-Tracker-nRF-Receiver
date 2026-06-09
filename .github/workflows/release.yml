@@ -1,0 +1,142 @@
+name: Build & Release (all receiver boards)
+
+# Builds the LATEST upstream SlimeVR-Tracker-nRF-Receiver for every supported
+# board and publishes them together as a single GitHub Release on this fork.
+#
+# This fork is stock (no customizations), so the build simply clones pristine
+# upstream `main` and builds it — there is no overlay to apply. Releases are
+# therefore always a faithful build of current upstream, independent of how far
+# behind this fork's own branches happen to be.
+
+on:
+  schedule:
+    # Mondays 06:00 UTC. NOTE: GitHub only runs `schedule` from the repo's
+    # DEFAULT branch, so this branch must be set as the fork's default.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UPSTREAM_URL: https://github.com/SlimeVR/SlimeVR-Tracker-nRF-Receiver.git
+  UPSTREAM_BRANCH: main
+  ZEPHYR_SDK: "0.17.2"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        boards:
+          - { boardname: "nrf52840dongle/nrf52840",  fileformat: "hex", filename: "SlimeNRF_Nordic_eByte_Dongle_Receiver" }
+          - { boardname: "holyiot_21017/nrf52840",    fileformat: "hex", filename: "SlimeNRF_Holyiot_Dongle_Receiver" }
+          - { boardname: "promicro_uf2/nrf52840",     fileformat: "uf2", filename: "SlimeNRF_ProMicro_Receiver" }
+          - { boardname: "xiao_ble/nrf52840",         fileformat: "uf2", filename: "SlimeNRF_XIAO_Receiver" }
+          - { boardname: "etee_dongle_uf2/nrf52840",  fileformat: "uf2", filename: "SlimeNRF_etee_Receiver" }
+          - { boardname: "nrf52840dk/nrf52840",       fileformat: "hex", filename: "SlimeNRF_nRF52840dk_Receiver" }
+          - { boardname: "butterfly_p1_uf2/nrf52833", fileformat: "uf2", filename: "SlimeNRF_Butterfly_P1_Receiver" }
+    steps:
+
+      - name: 🧹 Clean landing site
+        run: sudo rm -rf zephyr-workspace
+
+      - name: 🧰 Install dependencies + west
+        run: |
+          sudo apt-get update && sudo apt install --no-install-recommends -y \
+            git cmake ninja-build gperf ccache dfu-util device-tree-compiler \
+            wget python3-dev python3-pip python3-setuptools python3-tk \
+            python3-wheel python3-venv xz-utils file make gcc gcc-multilib \
+            g++-multilib libsdl2-dev libmagic1
+          python3 -m venv ~/.venv
+          source ~/.venv/bin/activate
+          echo "PATH=$PATH" >> $GITHUB_ENV
+          pip3 install west ninja
+
+      - name: 🪁 Install Zephyr SDK
+        run: |
+          wget -q https://github.com/zephyrproject-rtos/sdk-ng/releases/download/v${ZEPHYR_SDK}/zephyr-sdk-${ZEPHYR_SDK}_linux-x86_64_minimal.tar.xz
+          tar xf zephyr-sdk-${ZEPHYR_SDK}_linux-x86_64_minimal.tar.xz -C ~/
+          ~/zephyr-sdk-${ZEPHYR_SDK}/setup.sh -c -t arm-zephyr-eabi
+
+      - name: 📂 Clone pristine upstream (${{ env.UPSTREAM_BRANCH }})
+        run: |
+          mkdir -p zephyr-workspace
+          git clone --single-branch --recurse-submodules \
+            -b "$UPSTREAM_BRANCH" "$UPSTREAM_URL" zephyr-workspace/SlimeNRF-CI
+
+      - name: ♻️ Initialize Zephyr workspace
+        run: |
+          cd zephyr-workspace
+          sudo rm -rf .west
+          west init -l SlimeNRF-CI
+          west update --narrow -o=--depth=1
+          west zephyr-export
+
+      - name: 🐍 Install Python dependencies
+        run: |
+          cd zephyr-workspace
+          pip3 install -r zephyr/scripts/requirements.txt
+
+      - name: 🔨 Build ${{ matrix.boards.boardname }}
+        run: |
+          cd zephyr-workspace
+          west build \
+            --board "${{ matrix.boards.boardname }}" \
+            --pristine=always SlimeNRF-CI \
+            --build-dir SlimeNRF-CI/build \
+            -- \
+            -DNCS_TOOLCHAIN_VERSION=NONE \
+            -DBOARD_ROOT="$PWD/SlimeNRF-CI"
+          mv "SlimeNRF-CI/build/SlimeNRF-CI/zephyr/zephyr.${{ matrix.boards.fileformat }}" \
+             "${{ matrix.boards.filename }}.${{ matrix.boards.fileformat }}"
+          ls -l "${{ matrix.boards.filename }}.${{ matrix.boards.fileformat }}"
+
+      - name: 💾 Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.boards.filename }}
+          path: zephyr-workspace/${{ matrix.boards.filename }}.${{ matrix.boards.fileformat }}
+          if-no-files-found: ignore
+
+  release:
+    needs: build
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: ⬇️ Collect all firmware artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: "*"
+          merge-multiple: true
+
+      - name: 🏷️ Resolve upstream version
+        id: ver
+        run: |
+          SHA=$(git ls-remote "$UPSTREAM_URL" "refs/heads/$UPSTREAM_BRANCH" | cut -c1-7)
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "date=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+
+      - name: 📦 List collected files
+        run: ls -l dist || true
+
+      - name: 🚀 Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: receiver-${{ steps.ver.outputs.date }}-${{ steps.ver.outputs.sha }}
+          name: SlimeNRF Receiver (upstream ${{ steps.ver.outputs.sha }})
+          body: |
+            Automated build of all supported SlimeNRF receiver boards.
+
+            - Built from upstream [`SlimeVR/SlimeVR-Tracker-nRF-Receiver`](${{ env.UPSTREAM_URL }}) `${{ env.UPSTREAM_BRANCH }}` @ `${{ steps.ver.outputs.sha }}`
+            - Stock firmware (this fork carries no customizations)
+
+            Pick the file matching your receiver hardware. `.uf2` boards flash by copying to the mass-storage volume after double-tapping reset; `.hex` boards flash with `nrfutil`/a programmer.
+          files: dist/*
+          fail_on_unmatched_files: false
