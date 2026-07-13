@@ -3,6 +3,11 @@ name: Build & Release (all receiver boards)
 # Builds the LATEST upstream SlimeVR-Tracker-nRF-Receiver for every supported
 # board and publishes them together as a single GitHub Release on this fork.
 #
+# A daily `check` job compares upstream HEAD against the SHA embedded in the
+# latest release tag (receiver-<date>-<sha>) and skips the whole build matrix
+# when upstream hasn't moved, so releases only appear when there is something
+# new to build. `workflow_dispatch` bypasses the check and always builds.
+#
 # This fork is stock (no customizations), so the build clones upstream `main`
 # and builds it, independent of how far behind this fork's own branches happen
 # to be. One temporary exception: a two-line config patch is applied to fix the
@@ -12,9 +17,12 @@ name: Build & Release (all receiver boards)
 
 on:
   schedule:
-    # Mondays 06:00 UTC. NOTE: GitHub only runs `schedule` from the repo's
-    # DEFAULT branch, so this branch must be set as the fork's default.
-    - cron: "0 6 * * 1"
+    # Daily 11:00 UTC - midday UK in summer, 11:00 in winter (cron can't
+    # follow DST), so releases land while someone is awake to notice them.
+    # The `check` job makes no-change runs cost seconds, so polling daily is
+    # cheap. NOTE: GitHub only runs `schedule` from the repo's DEFAULT
+    # branch, so this branch must be set as the fork's default.
+    - cron: "0 11 * * *"
   workflow_dispatch:
 
 permissions:
@@ -30,7 +38,42 @@ env:
   ZEPHYR_SDK: "0.17.2"
 
 jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.gate.outputs.build }}
+      sha: ${{ steps.gate.outputs.sha }}
+    steps:
+      - name: 🕵️ Compare upstream HEAD with last release
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          SHA=$(git ls-remote "$UPSTREAM_URL" "refs/heads/$UPSTREAM_BRANCH" | cut -c1-7)
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+
+          # Latest release tag looks like receiver-<date>-<sha>; the suffix is
+          # the upstream SHA that release was built from.
+          LAST_TAG=$(gh release view --json tagName -q .tagName 2>/dev/null || true)
+          LAST_SHA="${LAST_TAG##*-}"
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "🔧 Manual run - building regardless of upstream state."
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          elif [ "$SHA" = "$LAST_SHA" ]; then
+            echo "✅ Upstream $UPSTREAM_BRANCH still at $SHA (last release: ${LAST_TAG:-none}). Nothing to build."
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "🆕 Upstream moved: $LAST_SHA -> $SHA. Building."
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
   build:
+    needs: check
+    if: needs.check.outputs.build == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -115,8 +158,10 @@ jobs:
           if-no-files-found: ignore
 
   release:
-    needs: build
-    if: always()
+    needs: [check, build]
+    # Publish even if some matrix builds failed (fail-fast is off), but not
+    # when the check job decided there was nothing new to build.
+    if: ${{ !cancelled() && needs.check.outputs.build == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: ⬇️ Collect all firmware artifacts
@@ -129,8 +174,9 @@ jobs:
       - name: 🏷️ Resolve upstream version
         id: ver
         run: |
-          SHA=$(git ls-remote "$UPSTREAM_URL" "refs/heads/$UPSTREAM_BRANCH" | cut -c1-7)
-          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          # Use the SHA the check job saw, not a fresh ls-remote: if upstream
+          # moves mid-build, the tag should still match what was built.
+          echo "sha=${{ needs.check.outputs.sha }}" >> "$GITHUB_OUTPUT"
           echo "date=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
 
       - name: 📦 List collected files

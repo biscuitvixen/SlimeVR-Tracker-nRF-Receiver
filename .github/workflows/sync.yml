@@ -1,6 +1,6 @@
 name: Sync with upstream
 
-# Weekly (and on-demand) check for new commits on upstream
+# Daily (and on-demand) check for new commits on upstream
 # SlimeVR-Tracker-nRF-Receiver `main`. When upstream is ahead, this merges
 # upstream into a `sync/upstream-<date>` branch and opens a PR against this
 # fork's default branch for review.
@@ -11,9 +11,12 @@ name: Sync with upstream
 
 on:
   schedule:
-    # Mondays 05:00 UTC (before the release build). NOTE: `schedule` only runs
-    # from the repo's DEFAULT branch — this workflow must live there.
-    - cron: "0 5 * * 1"
+    # Daily 10:00 UTC (an hour before the release build; late morning UK,
+    # scheduled for waking hours since these runs are worth noticing). The
+    # workflow exits in seconds when upstream hasn't moved. NOTE: `schedule`
+    # only runs from the repo's DEFAULT branch - this workflow must live
+    # there.
+    - cron: "0 10 * * *"
   workflow_dispatch:
 
 permissions:
@@ -65,7 +68,7 @@ jobs:
           git push --force-with-lease origin "$SYNC_BRANCH"
 
           TITLE="Sync with upstream ($(date -u +%Y-%m-%d))"
-          BODY="Automated weekly sync: merges \`upstream/${UPSTREAM_BRANCH}\` into \`${BASE}\`.
+          BODY="Automated upstream sync: merges \`upstream/${UPSTREAM_BRANCH}\` into \`${BASE}\`.
 
           Review the upstream changes below and merge when ready. Firmware releases are
           unaffected by the state of this PR (release.yml always builds from fresh upstream)."
