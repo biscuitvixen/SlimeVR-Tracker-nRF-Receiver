@@ -3,10 +3,12 @@ name: Build & Release (all receiver boards)
 # Builds the LATEST upstream SlimeVR-Tracker-nRF-Receiver for every supported
 # board and publishes them together as a single GitHub Release on this fork.
 #
-# This fork is stock (no customizations), so the build simply clones pristine
-# upstream `main` and builds it — there is no overlay to apply. Releases are
-# therefore always a faithful build of current upstream, independent of how far
-# behind this fork's own branches happen to be.
+# This fork is stock (no customizations), so the build clones upstream `main`
+# and builds it, independent of how far behind this fork's own branches happen
+# to be. One temporary exception: a two-line config patch is applied to fix the
+# nrf52840dongle and xiao_ble builds, which are broken on upstream main.
+# See ci-failure-diagnosis.md (local) / the patch step below. Remove the patch
+# step once the fix lands upstream.
 
 on:
   schedule:
@@ -69,6 +71,14 @@ jobs:
           mkdir -p zephyr-workspace
           git clone --single-branch --recurse-submodules \
             -b "$UPSTREAM_BRANCH" "$UPSTREAM_URL" zephyr-workspace/SlimeNRF-CI
+
+      - name: 🩹 Patch upstream USB stack conflict (remove once fixed upstream)
+        run: |
+          # Upstream uses the legacy USB stack, but these two boards default
+          # USB_DEVICE_STACK_NEXT=y for their CDC ACM console in current
+          # Zephyr, so both stacks get linked and collide on the cdc-acm node.
+          echo "CONFIG_USB_DEVICE_STACK_NEXT=n" >> zephyr-workspace/SlimeNRF-CI/boards/nrf52840dongle_nrf52840.conf
+          echo "CONFIG_USB_DEVICE_STACK_NEXT=n" >> zephyr-workspace/SlimeNRF-CI/boards/xiao_ble.conf
 
       - name: ♻️ Initialize Zephyr workspace
         run: |
@@ -135,7 +145,7 @@ jobs:
             Automated build of all supported SlimeNRF receiver boards.
 
             - Built from upstream [`SlimeVR/SlimeVR-Tracker-nRF-Receiver`](${{ env.UPSTREAM_URL }}) `${{ env.UPSTREAM_BRANCH }}` @ `${{ steps.ver.outputs.sha }}`
-            - Stock firmware (this fork carries no customizations)
+            - Stock firmware, except for a two-line build fix for the dongle and XIAO boards (upstream main currently fails to build them)
 
             Pick the file matching your receiver hardware. `.uf2` boards flash by copying to the mass-storage volume after double-tapping reset; `.hex` boards flash with `nrfutil`/a programmer.
           files: dist/*
